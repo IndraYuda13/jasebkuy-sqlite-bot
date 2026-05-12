@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Storage](https://img.shields.io/badge/storage-SQLite-green) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-Bot Pyrogram sederhana untuk panel toko/userbot manager dengan penyimpanan SQLite. Versi ini adalah refactor dari script awal yang memakai MongoDB.
+Bot Telegram sederhana untuk panel toko/userbot manager dengan penyimpanan SQLite. Bot utama memakai Bot API polling, sedangkan Pyrogram tetap dipakai untuk userbot broadcast. Versi ini adalah refactor dari script awal yang memakai MongoDB.
 
 ## Fitur
 
@@ -10,6 +10,7 @@ Bot Pyrogram sederhana untuk panel toko/userbot manager dengan penyimpanan SQLit
 - Dashboard admin
 - Pengaturan tujuan laporan broadcast
 - Broadcast massal lewat session string userbot yang tersimpan di SQLite
+- Bot-side memakai Bot API polling supaya `/start` dan callback stabil
 - Pengaturan jeda broadcast dari panel admin
 - Konfigurasi aman via `.env`, tidak hardcode token/API key
 

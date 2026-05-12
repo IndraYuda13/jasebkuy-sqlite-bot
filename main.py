@@ -4,12 +4,13 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
+import aiohttp
 import psutil
 from dotenv import load_dotenv
-from pyrogram import Client, enums, filters, idle
+from pyrogram import Client as UserClient, enums
 from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 load_dotenv()
 
@@ -30,6 +31,7 @@ OWNER_ID = env_int("OWNER_ID")
 BOT_NAME = os.getenv("BOT_NAME", "Toko JasebKuy")
 DB_PATH = Path(os.getenv("DB_PATH", "jasebkuy.sqlite3"))
 SESSION_DIR = Path(os.getenv("SESSION_DIR", "sessions"))
+DROP_PENDING_UPDATES = os.getenv("DROP_PENDING_UPDATES", "1") != "0"
 
 if not API_HASH:
     raise RuntimeError("Environment variable API_HASH wajib diisi")
@@ -37,8 +39,6 @@ if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN wajib diisi")
 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-bot = Client("jasebkuy_engine", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 state_db: dict[int, dict[str, str]] = {}
 db_lock = asyncio.Lock()
 
@@ -95,10 +95,7 @@ async def init_db() -> None:
 
 
 async def get_conf() -> dict:
-    async def ensure():
-        await init_db()
-
-    await ensure()
+    await init_db()
 
     def work():
         with _connect() as conn:
@@ -109,8 +106,6 @@ async def get_conf() -> dict:
 
 
 async def update_conf(**fields) -> None:
-    if not fields:
-        return
     allowed = {"jeda_grup", "jeda_loop", "report_dest_type", "report_pm_id", "report_pm_username"}
     clean = {k: v for k, v in fields.items() if k in allowed}
     if not clean:
@@ -147,43 +142,88 @@ def get_ram_info() -> str:
     return f"{ram.total >> 30}GB"
 
 
-def main_menu_buttons(user_id: int) -> InlineKeyboardMarkup:
+class BotAPI:
+    def __init__(self, token: str):
+        self.base_url = f"https://api.telegram.org/bot{token}"
+        self.session: aiohttp.ClientSession | None = None
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90))
+        return self
+
+    async def __aexit__(self, *_):
+        if self.session:
+            await self.session.close()
+
+    async def call(self, method: str, payload: dict | None = None) -> dict:
+        assert self.session is not None
+        async with self.session.post(f"{self.base_url}/{method}", json=payload or {}) as resp:
+            data = await resp.json(content_type=None)
+            if not data.get("ok"):
+                raise RuntimeError(f"Telegram API {method} failed: {data}")
+            return data["result"]
+
+    async def get_updates(self, offset: int | None = None, timeout: int = 50, limit: int = 50) -> list[dict]:
+        payload: dict[str, Any] = {"timeout": timeout, "limit": limit, "allowed_updates": ["message", "callback_query"]}
+        if offset is not None:
+            payload["offset"] = offset
+        return await self.call("getUpdates", payload)
+
+    async def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None):
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        return await self.call("sendMessage", payload)
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str, reply_markup: dict | None = None):
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        return await self.call("editMessageText", payload)
+
+    async def answer_callback(self, callback_query_id: str, text: str = "", show_alert: bool = False):
+        return await self.call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert})
+
+    async def get_me(self):
+        return await self.call("getMe")
+
+    async def get_chat(self, chat_id: str | int):
+        return await self.call("getChat", {"chat_id": chat_id})
+
+
+def ik_button(text: str, data: str) -> dict:
+    return {"text": text, "callback_data": data}
+
+
+def markup(rows: list[list[dict]]) -> dict:
+    return {"inline_keyboard": rows}
+
+
+def main_menu_buttons(user_id: int) -> dict:
     btns = [
-        [
-            InlineKeyboardButton("🛍️ Order Produk", callback_data="noop"),
-            InlineKeyboardButton("💳 Isi Saldo", callback_data="noop"),
-        ],
-        [InlineKeyboardButton("🚀 Install Userbot", callback_data="ask_num")],
+        [ik_button("🛍️ Order Produk", "noop"), ik_button("💳 Isi Saldo", "noop")],
+        [ik_button("🚀 Install Userbot", "ask_num")],
     ]
     if user_id == OWNER_ID:
-        btns.append([InlineKeyboardButton("📊 Dashboard Admin", callback_data="admin_stats")])
-    return InlineKeyboardMarkup(btns)
+        btns.append([ik_button("📊 Dashboard Admin", "admin_stats")])
+    return markup(btns)
 
 
-async def send_main_menu(message, user_id: int):
-    ram_vps = get_ram_info()
-    text = (
+def main_menu_text() -> str:
+    return (
         "🔥 **UBOT MANAGER V1** 🔥\n\n"
         "Status VPS: ONLINE ✅\n"
-        f"RAM: {ram_vps} 🚀\n\n"
+        f"RAM: {get_ram_info()} 🚀\n\n"
         f"✨ **Selamat Datang di {BOT_NAME}** ✨\n"
         "Silakan pilih menu di bawah untuk bertransaksi."
     )
-    await message.reply(text, reply_markup=main_menu_buttons(user_id))
 
 
-@bot.on_message(filters.command("start"))
-async def start(_, message):
-    print(f"/start from {message.from_user.id}", flush=True)
-    await send_main_menu(message, message.from_user.id)
+async def send_main_menu(api: BotAPI, chat_id: int, user_id: int):
+    await api.send_message(chat_id, main_menu_text(), reply_markup=main_menu_buttons(user_id))
 
 
-@bot.on_callback_query(filters.regex("^admin_stats$"))
-async def admin_stats(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-
+async def show_admin_stats(api: BotAPI, chat_id: int, message_id: int):
     c = await get_conf()
     total_acc = await count_users()
     text = (
@@ -192,21 +232,16 @@ async def admin_stats(_, callback_query):
         f"Jeda Grup: `{c['jeda_grup']}s` | Putaran: `{c['jeda_loop']}s`\n"
         f"Tujuan Laporan: `{c['report_pm_username']}`"
     )
-    btns = [
-        [InlineKeyboardButton("📢 Broadcast Massal", callback_data="start_bc")],
-        [InlineKeyboardButton("📊 Laporan Broadcast", callback_data="report_menu")],
-        [InlineKeyboardButton("⚙️ Set Jeda", callback_data="ask_delay")],
-        [InlineKeyboardButton("⬅️ Kembali", callback_data="back")],
-    ]
-    await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(btns))
+    btns = markup([
+        [ik_button("📢 Broadcast Massal", "start_bc")],
+        [ik_button("📊 Laporan Broadcast", "report_menu")],
+        [ik_button("⚙️ Set Jeda", "ask_delay")],
+        [ik_button("⬅️ Kembali", "back")],
+    ])
+    await api.edit_message_text(chat_id, message_id, text, reply_markup=btns)
 
 
-@bot.on_callback_query(filters.regex("^report_menu$"))
-async def report_menu(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-
+async def show_report_menu(api: BotAPI, chat_id: int, message_id: int):
     c = await get_conf()
     status = f"PM -> @{c['report_pm_username']}" if c["report_dest_type"] == "pm" else "Ke Bot Owner (Default)"
     text = (
@@ -215,77 +250,18 @@ async def report_menu(_, callback_query):
         "📍 **Status Saat Ini:**\n"
         f"💬 {status}"
     )
-    btns = [
-        [InlineKeyboardButton("🤖 Ke Bot Owner", callback_data="set_dest_bot")],
-        [InlineKeyboardButton("💬 Ke PM Username", callback_data="ask_dest_pm")],
-        [InlineKeyboardButton("🔙 Kembali", callback_data="admin_stats")],
-    ]
-    await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(btns))
-
-
-@bot.on_callback_query(filters.regex("^set_dest_bot$"))
-async def set_dest_bot(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-    await update_conf(report_dest_type="bot", report_pm_id=OWNER_ID, report_pm_username="Owner")
-    await callback_query.answer("Tujuan laporan diset ke owner bot")
-    await report_menu(_, callback_query)
-
-
-@bot.on_callback_query(filters.regex("^ask_dest_pm$"))
-async def ask_dest_pm(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-    state_db[callback_query.from_user.id] = {"step": "input_report_user"}
-    await callback_query.message.edit_text("💬 Kirim username tujuan laporan. Contoh: `@username`")
-
-
-@bot.on_callback_query(filters.regex("^ask_delay$"))
-async def ask_delay(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-    state_db[callback_query.from_user.id] = {"step": "input_delay"}
-    await callback_query.message.edit_text("⚙️ Kirim jeda dengan format: `jeda_grup jeda_loop`\nContoh: `2 60`")
-
-
-@bot.on_callback_query(filters.regex("^start_bc$"))
-async def bc_btn(_, callback_query):
-    if callback_query.from_user.id != OWNER_ID:
-        await callback_query.answer("Khusus owner", show_alert=True)
-        return
-    state_db[callback_query.from_user.id] = {"step": "bc_msg"}
-    await callback_query.message.edit_text("📢 **Kirim pesan promosi:**")
-
-
-@bot.on_callback_query(filters.regex("^back$"))
-async def back_btn(_, callback_query):
-    text = (
-        "🔥 **UBOT MANAGER V1** 🔥\n\n"
-        "Status VPS: ONLINE ✅\n"
-        f"RAM: {get_ram_info()} 🚀\n\n"
-        f"✨ **Selamat Datang di {BOT_NAME}** ✨\n"
-        "Silakan pilih menu di bawah untuk bertransaksi."
-    )
-    await callback_query.message.edit_text(text, reply_markup=main_menu_buttons(callback_query.from_user.id))
-
-
-@bot.on_callback_query(filters.regex("^ask_num$"))
-async def ask_num(_, callback_query):
-    await callback_query.answer("Fitur install userbot belum diaktifkan di versi SQLite ini.", show_alert=True)
-
-
-@bot.on_callback_query(filters.regex("^noop$"))
-async def noop(_, callback_query):
-    await callback_query.answer("Fitur ini belum tersedia.", show_alert=True)
+    btns = markup([
+        [ik_button("🤖 Ke Bot Owner", "set_dest_bot")],
+        [ik_button("💬 Ke PM Username", "ask_dest_pm")],
+        [ik_button("🔙 Kembali", "admin_stats")],
+    ])
+    await api.edit_message_text(chat_id, message_id, text, reply_markup=btns)
 
 
 @asynccontextmanager
 async def userbot_client(user: dict):
     session_name = str(SESSION_DIR / f"ubot_{user['id']}")
-    ubot = Client(session_name, session_string=user["session"], api_id=API_ID, api_hash=API_HASH)
+    ubot = UserClient(session_name, session_string=user["session"], api_id=API_ID, api_hash=API_HASH)
     try:
         await ubot.start()
         yield ubot
@@ -296,7 +272,7 @@ async def userbot_client(user: dict):
             pass
 
 
-async def safe_send_to_group(ubot: Client, chat_id: int, text: str) -> bool:
+async def safe_send_to_group(ubot: UserClient, chat_id: int, text: str) -> bool:
     try:
         await ubot.send_message(chat_id, text)
         return True
@@ -309,7 +285,7 @@ async def safe_send_to_group(ubot: Client, chat_id: int, text: str) -> bool:
     return False
 
 
-async def run_broadcast(client: Client, owner_msg, text_bc: str):
+async def run_broadcast(api: BotAPI, chat_id: int, text_bc: str):
     c = await get_conf()
     start_t = time.time()
     users = await get_active_users()
@@ -317,7 +293,9 @@ async def run_broadcast(client: Client, owner_msg, text_bc: str):
     total_groups = 0
     failed_accounts = 0
 
-    status_prog = await owner_msg.reply(f"⏳ **Memulai Broadcast...**\nAkun aktif: `{len(users)}`")
+    status_msg = await api.send_message(chat_id, f"⏳ **Memulai Broadcast...**\nAkun aktif: `{len(users)}`")
+    status_chat_id = status_msg["chat"]["id"]
+    status_msg_id = status_msg["message_id"]
 
     for user in users:
         sent_by_account = 0
@@ -330,15 +308,18 @@ async def run_broadcast(client: Client, owner_msg, text_bc: str):
                             total_sent += 1
                             sent_by_account += 1
                         await asyncio.sleep(int(c["jeda_grup"]))
-        except Exception:
+        except Exception as e:
             failed_accounts += 1
+            print(f"broadcast account failed {user.get('id')}: {e}", flush=True)
 
-        await status_prog.edit_text(
+        await api.edit_message_text(
+            status_chat_id,
+            status_msg_id,
             "⏳ **Broadcast berjalan...**\n"
             f"Terkirim: `{total_sent}`\n"
             f"Grup dicek: `{total_groups}`\n"
             f"Akun gagal: `{failed_accounts}`\n"
-            f"Akun terakhir: `{user.get('label') or user.get('phone') or user['id']}` -> `{sent_by_account}` grup"
+            f"Akun terakhir: `{user.get('label') or user.get('phone') or user['id']}` -> `{sent_by_account}` grup",
         )
         await asyncio.sleep(int(c["jeda_loop"]))
 
@@ -350,49 +331,135 @@ async def run_broadcast(client: Client, owner_msg, text_bc: str):
         f"Akun gagal: `{failed_accounts}`\n"
         f"Durasi: `{durasi}`"
     )
-    await status_prog.edit_text(report)
-    await client.send_message(int(c["report_pm_id"]), f"🔔 **NOTIF REPORT**\n\n{report}")
+    await api.edit_message_text(status_chat_id, status_msg_id, report)
+    await api.send_message(int(c["report_pm_id"]), f"🔔 **NOTIF REPORT**\n\n{report}")
 
 
-@bot.on_message(filters.text & filters.user(OWNER_ID))
-async def handle_inputs(client, message):
-    uid = message.from_user.id
-    if uid not in state_db:
+async def handle_message(api: BotAPI, message: dict):
+    chat_id = message["chat"]["id"]
+    from_user = message.get("from") or {}
+    user_id = from_user.get("id")
+    text = message.get("text") or ""
+    print(f"message from {user_id}: {text!r}", flush=True)
+
+    if text.startswith("/start"):
+        await send_main_menu(api, chat_id, user_id)
         return
 
-    step = state_db[uid]["step"]
+    if user_id != OWNER_ID:
+        return
+
+    if user_id not in state_db:
+        return
+
+    step = state_db[user_id]["step"]
     if step == "bc_msg":
-        asyncio.create_task(run_broadcast(client, message, message.text))
-        del state_db[uid]
+        asyncio.create_task(run_broadcast(api, chat_id, text))
+        del state_db[user_id]
     elif step == "input_report_user":
-        username = message.text.replace("@", "").strip()
+        username = text.replace("@", "").strip()
         try:
-            target = await client.get_users(username)
-            await update_conf(report_dest_type="pm", report_pm_id=target.id, report_pm_username=username)
-            await message.reply(f"✅ Laporan akan dikirim ke @{username}")
-            del state_db[uid]
-        except Exception:
-            await message.reply("❌ Username tidak ditemukan atau bot belum bisa mengakses user itu.")
+            target = await api.get_chat(f"@{username}")
+            await update_conf(report_dest_type="pm", report_pm_id=target["id"], report_pm_username=username)
+            await api.send_message(chat_id, f"✅ Laporan akan dikirim ke @{username}")
+            del state_db[user_id]
+        except Exception as e:
+            print(f"get_chat failed: {e}", flush=True)
+            await api.send_message(chat_id, "❌ Username tidak ditemukan atau bot belum bisa mengakses user itu.")
     elif step == "input_delay":
         try:
-            group_delay, loop_delay = [int(x) for x in message.text.split()[:2]]
+            group_delay, loop_delay = [int(x) for x in text.split()[:2]]
             if group_delay < 0 or loop_delay < 0:
                 raise ValueError
             await update_conf(jeda_grup=group_delay, jeda_loop=loop_delay)
-            await message.reply(f"✅ Jeda disimpan: grup `{group_delay}s`, loop `{loop_delay}s`")
-            del state_db[uid]
+            await api.send_message(chat_id, f"✅ Jeda disimpan: grup `{group_delay}s`, loop `{loop_delay}s`")
+            del state_db[user_id]
         except Exception:
-            await message.reply("❌ Format salah. Contoh benar: `2 60`")
+            await api.send_message(chat_id, "❌ Format salah. Contoh benar: `2 60`")
+
+
+async def handle_callback(api: BotAPI, cq: dict):
+    cq_id = cq["id"]
+    from_user = cq.get("from") or {}
+    user_id = from_user.get("id")
+    data = cq.get("data") or ""
+    msg = cq.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
+    print(f"callback from {user_id}: {data}", flush=True)
+
+    if user_id != OWNER_ID and data in {"admin_stats", "report_menu", "set_dest_bot", "ask_dest_pm", "ask_delay", "start_bc"}:
+        await api.answer_callback(cq_id, "Khusus owner", show_alert=True)
+        return
+
+    if data == "admin_stats":
+        await api.answer_callback(cq_id)
+        await show_admin_stats(api, chat_id, message_id)
+    elif data == "report_menu":
+        await api.answer_callback(cq_id)
+        await show_report_menu(api, chat_id, message_id)
+    elif data == "set_dest_bot":
+        await update_conf(report_dest_type="bot", report_pm_id=OWNER_ID, report_pm_username="Owner")
+        await api.answer_callback(cq_id, "Tujuan laporan diset ke owner bot")
+        await show_report_menu(api, chat_id, message_id)
+    elif data == "ask_dest_pm":
+        state_db[user_id] = {"step": "input_report_user"}
+        await api.answer_callback(cq_id)
+        await api.edit_message_text(chat_id, message_id, "💬 Kirim username tujuan laporan. Contoh: `@username`")
+    elif data == "ask_delay":
+        state_db[user_id] = {"step": "input_delay"}
+        await api.answer_callback(cq_id)
+        await api.edit_message_text(chat_id, message_id, "⚙️ Kirim jeda dengan format: `jeda_grup jeda_loop`\nContoh: `2 60`")
+    elif data == "start_bc":
+        state_db[user_id] = {"step": "bc_msg"}
+        await api.answer_callback(cq_id)
+        await api.edit_message_text(chat_id, message_id, "📢 **Kirim pesan promosi:**")
+    elif data == "back":
+        await api.answer_callback(cq_id)
+        await api.edit_message_text(chat_id, message_id, main_menu_text(), reply_markup=main_menu_buttons(user_id))
+    elif data == "ask_num":
+        await api.answer_callback(cq_id, "Fitur install userbot belum diaktifkan di versi SQLite ini.", show_alert=True)
+    else:
+        await api.answer_callback(cq_id, "Fitur ini belum tersedia.", show_alert=True)
+
+
+async def drop_pending_updates(api: BotAPI) -> int | None:
+    updates = await api.get_updates(timeout=0, limit=100)
+    if not updates:
+        return None
+    last_id = updates[-1]["update_id"]
+    await api.get_updates(offset=last_id + 1, timeout=0, limit=1)
+    return last_id + 1
+
+
+async def poll_loop(api: BotAPI):
+    offset = await drop_pending_updates(api) if DROP_PENDING_UPDATES else None
+    if offset:
+        print(f">>> Dropped pending updates, starting offset {offset} <<<", flush=True)
+
+    while True:
+        try:
+            updates = await api.get_updates(offset=offset, timeout=50, limit=50)
+            for update in updates:
+                offset = update["update_id"] + 1
+                if "message" in update:
+                    await handle_message(api, update["message"])
+                elif "callback_query" in update:
+                    await handle_callback(api, update["callback_query"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"poll error: {e}", flush=True)
+            await asyncio.sleep(3)
 
 
 async def main():
     await init_db()
     print(f">>> {BOT_NAME} SQLITE READY <<<", flush=True)
-    await bot.start()
-    me = await bot.get_me()
-    print(f">>> Logged in as @{me.username or me.id} <<<", flush=True)
-    await idle()
-    await bot.stop()
+    async with BotAPI(BOT_TOKEN) as api:
+        me = await api.get_me()
+        print(f">>> Bot API polling as @{me.get('username') or me.get('id')} <<<", flush=True)
+        await poll_loop(api)
 
 
 if __name__ == "__main__":
