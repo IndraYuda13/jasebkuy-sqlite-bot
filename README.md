@@ -1,5 +1,7 @@
 # JasebKuy SQLite Bot
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Storage](https://img.shields.io/badge/storage-SQLite-green) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
 Bot Pyrogram sederhana untuk panel toko/userbot manager dengan penyimpanan SQLite. Versi ini adalah refactor dari script awal yang memakai MongoDB.
 
 ## Fitur
@@ -99,3 +101,22 @@ Jangan commit file berikut:
 - session string userbot asli
 
 Kalau token bot pernah terkirim ke pihak lain, rotate token di BotFather sebelum dipakai production.
+
+## Operasional
+
+Screen aktif yang dipakai saat smoke test VPS:
+
+```bash
+screen -ls
+screen -r jasebkuy_sqlite
+```
+
+Log runtime lokal:
+
+```bash
+tail -f bot.log
+```
+
+## Migrasi dari MongoDB
+
+Script lama membaca koleksi MongoDB `users` dan `settings`. Versi ini memakai SQLite. Data akun userbot perlu dimasukkan ulang ke tabel `users` dengan kolom `session` dan `active=1`.
