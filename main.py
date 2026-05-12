@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psutil
 from dotenv import load_dotenv
-from pyrogram import Client, enums, filters
+from pyrogram import Client, enums, filters, idle
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -174,6 +174,7 @@ async def send_main_menu(message, user_id: int):
 
 @bot.on_message(filters.command("start"))
 async def start(_, message):
+    print(f"/start from {message.from_user.id}", flush=True)
     await send_main_menu(message, message.from_user.id)
 
 
@@ -386,9 +387,12 @@ async def handle_inputs(client, message):
 
 async def main():
     await init_db()
-    print(f">>> {BOT_NAME} SQLITE READY <<<")
+    print(f">>> {BOT_NAME} SQLITE READY <<<", flush=True)
     await bot.start()
-    await asyncio.Event().wait()
+    me = await bot.get_me()
+    print(f">>> Logged in as @{me.username or me.id} <<<", flush=True)
+    await idle()
+    await bot.stop()
 
 
 if __name__ == "__main__":
