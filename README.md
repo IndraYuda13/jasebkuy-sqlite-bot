@@ -18,8 +18,8 @@ Bot Pyrogram sederhana untuk panel toko/userbot manager dengan penyimpanan SQLit
 ### 1. Clone repo
 
 ```bash
-git clone <repo-url>
-cd jasebkuy-sqlite
+git clone https://github.com/IndraYuda13/jasebkuy-sqlite-bot
+cd jasebkuy-sqlite-bot
 ```
 
 ### 2. Buat virtualenv dan install dependency
